@@ -3482,7 +3482,7 @@ defmodule Ecto.Adapters.ClickHouse.ConnectionTest do
            ) ==
              """
              SELECT p0."id" FROM "posts" AS p0 \
-             WHERE (array(1,2,3) IN ({$0:Array(Nothing)}))\
+             WHERE (array(1,2,3) IN {$0:Array(Array(Nothing))})\
              """
 
     assert all(
@@ -3492,7 +3492,7 @@ defmodule Ecto.Adapters.ClickHouse.ConnectionTest do
            ) ==
              """
              SELECT p0."id" FROM "posts" AS p0 \
-             WHERE (array(1,2,3) IN ({$0:Array(Nothing)},{$1:Array(Nothing)},{$2:Array(Int64)}))\
+             WHERE (array(1,2,3) IN {$0:Array(Array(Int64))})\
              """
 
     assert all(
