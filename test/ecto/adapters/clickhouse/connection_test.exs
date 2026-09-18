@@ -1186,6 +1186,7 @@ defmodule Ecto.Adapters.ClickHouse.ConnectionTest do
       assert in_param_type([true, false]) == "Array(Bool)"
       assert in_param_type([1.0, 2.5]) == "Array(Float64)"
       assert in_param_type([~D[2020-01-01], ~D[2021-01-01]]) == "Array(Date)"
+      assert in_param_type([~T[12:00:00], ~T[13:00:00]]) == "Array(Time)"
       assert in_param_type([%{1 => "a"}, %{2 => "b"}]) == "Array(Map(Int64,String))"
     end
 
@@ -1218,6 +1219,18 @@ defmodule Ecto.Adapters.ClickHouse.ConnectionTest do
                "Array(Decimal(8,5))"
     end
 
+    test "dates outside the Date range widen to Date32" do
+      assert in_param_type([~D[2020-01-01], ~D[1900-01-01]]) == "Array(Date32)"
+      assert in_param_type([~D[1900-01-01], ~D[2020-01-01]]) == "Array(Date32)"
+      assert in_param_type([~D[2020-01-01], ~D[2200-01-01]]) == "Array(Date32)"
+      assert in_param_type([~D[2020-01-01], ~D[2148-01-01]]) == "Array(Date)"
+    end
+
+    test "times widen to the highest precision in the list" do
+      assert in_param_type([~T[12:00:00], ~T[13:00:00.123]]) == "Array(Time64(3))"
+      assert in_param_type([~T[12:00:00.123456], ~T[13:00:00]]) == "Array(Time64(6))"
+    end
+
     test "datetimes widen to the highest precision in the list" do
       assert in_param_type([~N[2020-01-01 00:00:00], ~N[2020-01-01 00:00:00.123]]) ==
                "Array(DateTime64(3))"
@@ -1229,6 +1242,19 @@ defmodule Ecto.Adapters.ClickHouse.ConnectionTest do
                "Array(DateTime)"
 
       assert in_param_type([~D[2020-01-01], ~N[2020-01-01 00:00:00]]) == "Array(DateTime)"
+
+      assert in_param_type([~D[2200-01-01], ~N[2020-01-01 00:00:00.123]]) ==
+               "Array(DateTime64(3))"
+
+      # DateTime only spans 1970..2106, so this is not quietly narrowed
+      assert_raise ArgumentError, ~r/Date32 and DateTime have no common type/, fn ->
+        in_param_type([~D[2200-01-01], ~N[2020-01-01 00:00:00]])
+      end
+
+      # Time is not a DateTime
+      assert_raise ArgumentError, ~r/Time and DateTime have no common type/, fn ->
+        in_param_type([~T[12:00:00], ~N[2020-01-01 00:00:00]])
+      end
     end
 
     test "integers mixed with floats widen to Float64" do

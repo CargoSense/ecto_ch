@@ -1365,8 +1365,10 @@ defmodule Ecto.Adapters.ClickHouse.Connection do
     end
   end
 
-  # TODO Date32
-  defp in_type(%Date{}), do: :date
+  # tracked as a year range so Date vs Date32 can be decided over the whole list
+  defp in_type(%Date{year: year}), do: {:date, year, year}
+
+  defp in_type(%Time{microsecond: {_value, precision}}), do: {:time, precision}
 
   defp in_type(%Decimal{} = decimal) do
     {precision, scale} = decimal_precision_and_scale!(decimal)
@@ -1424,8 +1426,29 @@ defmodule Ecto.Adapters.ClickHouse.Connection do
     {:datetime, max(precision1, precision2)}
   end
 
-  defp unify_in_type(:date, {:datetime, _} = datetime), do: datetime
-  defp unify_in_type({:datetime, _} = datetime, :date), do: datetime
+  defp unify_in_type({:date, min1, max1}, {:date, min2, max2}) do
+    {:date, min(min1, min2), max(max1, max2)}
+  end
+
+  # DateTime spans 1970..2106 and DateTime64 spans 1900..2299, so a Date only
+  # folds into one of them when every value in the list is in range
+  defp unify_in_type({:date, min_year, max_year}, {:datetime, 0} = datetime)
+       when min_year >= 1970 and max_year <= 2106 do
+    datetime
+  end
+
+  defp unify_in_type({:date, min_year, max_year}, {:datetime, precision} = datetime)
+       when precision > 0 and min_year >= 1900 and max_year <= 2299 do
+    datetime
+  end
+
+  defp unify_in_type({:datetime, _} = datetime, {:date, _, _} = date) do
+    unify_in_type(date, datetime)
+  end
+
+  defp unify_in_type({:time, precision1}, {:time, precision2}) do
+    {:time, max(precision1, precision2)}
+  end
 
   defp unify_in_type({:array, left}, {:array, right}), do: {:array, unify_in_type(left, right)}
 
@@ -1469,7 +1492,14 @@ defmodule Ecto.Adapters.ClickHouse.Connection do
   defp render_in_type(:string), do: "String"
   defp render_in_type(:bool), do: "Bool"
   defp render_in_type(:float), do: "Float64"
-  defp render_in_type(:date), do: "Date"
+  defp render_in_type({:time, 0}), do: "Time"
+  defp render_in_type({:time, precision}), do: ["Time64(", Integer.to_string(precision), ?)]
+
+  # https://clickhouse.com/docs/en/sql-reference/data-types/date32
+  defp render_in_type({:date, min_year, max_year}) do
+    if min_year < 1970 or max_year > 2148, do: "Date32", else: "Date"
+  end
+
   defp render_in_type({:datetime, 0}), do: "DateTime"
 
   defp render_in_type({:datetime, precision}) do
