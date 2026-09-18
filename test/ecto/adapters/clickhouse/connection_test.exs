@@ -1175,6 +1175,122 @@ defmodule Ecto.Adapters.ClickHouse.ConnectionTest do
              ~s|SELECT s0 IN (1,2,3) FROM "schema" AS s0|
   end
 
+  defp in_param_type(values) do
+    to_string(Connection.in_param_type(values))
+  end
+
+  describe "in param type" do
+    test "homogeneous lists keep their element type" do
+      assert in_param_type([1, 2, 3]) == "Array(Int64)"
+      assert in_param_type(["a", "b"]) == "Array(String)"
+      assert in_param_type([true, false]) == "Array(Bool)"
+      assert in_param_type([1.0, 2.5]) == "Array(Float64)"
+      assert in_param_type([~D[2020-01-01], ~D[2021-01-01]]) == "Array(Date)"
+      assert in_param_type([%{1 => "a"}, %{2 => "b"}]) == "Array(Map(Int64,String))"
+    end
+
+    # the element type is unified across the whole list, not taken from its
+    # head, since `in` sends the list as a single Array(...) param
+    test "integers widen to a type that fits every value" do
+      assert in_param_type([1, 9_223_372_036_854_775_808]) == "Array(UInt64)"
+      assert in_param_type([1, 18_446_744_073_709_551_616]) == "Array(UInt128)"
+
+      assert in_param_type([1, 340_282_366_920_938_463_463_374_607_431_768_211_456]) ==
+               "Array(UInt256)"
+
+      assert in_param_type([-1, 9_223_372_036_854_775_808]) == "Array(Int128)"
+      assert in_param_type([-9_223_372_036_854_775_809, 1]) == "Array(Int128)"
+
+      assert in_param_type([
+               -170_141_183_460_469_231_731_687_303_715_884_105_729,
+               1
+             ]) == "Array(Int256)"
+
+      # order does not matter
+      assert in_param_type([9_223_372_036_854_775_808, 1]) == "Array(UInt64)"
+    end
+
+    test "decimals widen to a precision and scale that fit every value" do
+      assert in_param_type([Decimal.new("1.0"), Decimal.new("2.12345")]) == "Array(Decimal(6,5))"
+      assert in_param_type([Decimal.new("2.12345"), Decimal.new("1.0")]) == "Array(Decimal(6,5))"
+
+      assert in_param_type([Decimal.new("123.4"), Decimal.new("1.23456")]) ==
+               "Array(Decimal(8,5))"
+    end
+
+    test "datetimes widen to the highest precision in the list" do
+      assert in_param_type([~N[2020-01-01 00:00:00], ~N[2020-01-01 00:00:00.123]]) ==
+               "Array(DateTime64(3))"
+
+      assert in_param_type([~N[2020-01-01 00:00:00.123456], ~N[2020-01-01 00:00:00]]) ==
+               "Array(DateTime64(6))"
+
+      assert in_param_type([~N[2020-01-01 00:00:00], ~N[2020-01-01 00:00:00]]) ==
+               "Array(DateTime)"
+
+      assert in_param_type([~D[2020-01-01], ~N[2020-01-01 00:00:00]]) == "Array(DateTime)"
+    end
+
+    test "integers mixed with floats widen to Float64" do
+      assert in_param_type([1, 2.5]) == "Array(Float64)"
+      assert in_param_type([2.5, 1]) == "Array(Float64)"
+    end
+
+    test "nil makes the element type Nullable, regardless of position" do
+      assert in_param_type(["a", nil]) == "Array(Nullable(String))"
+      assert in_param_type([nil, "a"]) == "Array(Nullable(String))"
+      assert in_param_type([nil, 1, nil]) == "Array(Nullable(Int64))"
+      assert in_param_type([nil, nil]) == "Array(Nullable(Nothing))"
+      assert in_param_type([nil, 1, 9_223_372_036_854_775_808]) == "Array(Nullable(UInt64))"
+    end
+
+    test "nested empty arrays take their type from the other elements" do
+      assert in_param_type([[]]) == "Array(Array(Nothing))"
+      assert in_param_type([[], [], [1, 2, 3]]) == "Array(Array(Int64))"
+      assert in_param_type([[1, 2, 3], []]) == "Array(Array(Int64))"
+      assert in_param_type([[1], [9_223_372_036_854_775_808]]) == "Array(Array(UInt64))"
+    end
+
+    test "lists without a common type raise instead of being coerced" do
+      assert_raise ArgumentError, ~r/String and Int64 have no common type/, fn ->
+        in_param_type(["a", 1])
+      end
+
+      assert_raise ArgumentError, ~r/Bool and Int64 have no common type/, fn ->
+        in_param_type([true, 1])
+      end
+
+      assert_raise ArgumentError, ~r/Date and String have no common type/, fn ->
+        in_param_type([~D[2020-01-01], "2020-01-01"])
+      end
+
+      # Float64 cannot represent every Int128, so this is not silently widened
+      assert_raise ArgumentError, ~r/Int128 and Float64 have no common type/, fn ->
+        in_param_type([-9_223_372_036_854_775_809, 2.5])
+      end
+    end
+
+    test "nil mixed with arrays or maps raises, since ClickHouse has no Nullable(Array)" do
+      assert_raise ArgumentError, ~r/cannot put Array\(Int64\) inside Nullable/, fn ->
+        in_param_type([[1, 2], nil])
+      end
+
+      assert_raise ArgumentError, ~r/cannot put Map\(Int64,String\) inside Nullable/, fn ->
+        in_param_type([%{1 => "a"}, nil])
+      end
+    end
+  end
+
+  test "in expression with a mixed list" do
+    query = Schema |> select([e], 1 in ^[1, 9_223_372_036_854_775_808])
+    assert all(query) == ~s[SELECT 1 IN {$0:Array(UInt64)} FROM "schema" AS s0]
+
+    query = Post |> where([p], p.title in ^["hello", nil]) |> select([p], p.id)
+
+    assert all(query) ==
+             ~s[SELECT p0."id" FROM "posts" AS p0 WHERE (p0."title" IN {$0:Array(Nullable(String))})]
+  end
+
   test "in subquery" do
     posts =
       "posts"
